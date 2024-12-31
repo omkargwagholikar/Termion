@@ -53,10 +53,11 @@ fn main() {
     }
 }
 
-// #[derive(Default)]
 struct Termion {
     fd: OwnedFd,
     buf: Vec<u8>,
+    command_history: Vec<String>, // Store command history
+    current_command: String,      // Track current command being typed
 }
 
 impl Termion {
@@ -64,6 +65,8 @@ impl Termion {
         Termion {
             fd,
             buf: Vec::new(),
+            command_history: Vec::new(),
+            current_command: String::new(),
         }
     }
 }
@@ -71,7 +74,6 @@ impl Termion {
 impl eframe::App for Termion {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut buf = vec![0u8; 4096];
-        // let mut string;
         println!(":");
         match nix::unistd::read(self.fd.as_raw_fd(), &mut buf) {
             Ok(0) => {
@@ -90,27 +92,43 @@ impl eframe::App for Termion {
             }
         }
 
+        // Show command history in side panel
+        egui::SidePanel::left("history_panel")
+            .min_width(200.0)
+            .show(ctx, |ui| {
+                ui.heading("Command History");
+                ui.separator();
+                for cmd in &self.command_history {
+                    ui.label(cmd);
+                }
+            });
+
         let binding = self.buf.clone();
         let str_temp = std::str::from_utf8(&binding).unwrap();
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // ui.heading("Hello World! I am working on a new project");
             ui.input(|input_state| {
                 for event in &input_state.events {
                     let text = match event {
-                        egui::Event::Text(text) => text,
+                        egui::Event::Text(text) => {
+                            self.current_command.push_str(text);
+                            text
+                        }
                         egui::Event::Key { key, .. } => match key {
-                            // \r takes the cursor back to the first position in the line
-                            // \n pushed the paper up by one line, like a type writer...
-                            egui::Key::Enter => "\r\n",
+                            egui::Key::Enter => {
+                                // Store command in history when Enter is pressed
+                                if !self.current_command.trim().is_empty() {
+                                    self.command_history.push(self.current_command.clone());
+                                }
+                                self.current_command.clear();
+                                "\n"
+                            }
                             _ => "",
                         },
                         _ => "",
                     };
-
                     let bytes = text.as_bytes();
                     let mut to_write: &[u8] = &bytes;
-
                     while to_write.len() > 0 {
                         let written = nix::unistd::write(self.fd.as_fd(), to_write).unwrap();
                         to_write = &to_write[written..];

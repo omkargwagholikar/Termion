@@ -1,14 +1,13 @@
 use eframe::egui;
 use nix::{
+    errno::Errno,
     fcntl::{fcntl, FcntlArg, OFlag},
     pty::{forkpty, ForkptyResult},
 };
 
 use std::{
     ffi::CStr,
-    fs::File,
-    io::Read,
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     process::exit,
 };
 
@@ -27,9 +26,11 @@ fn main() {
                 let shell_name = CStr::from_bytes_until_nul(b"sh\0")
                     .expect("Something went wrong in creating the shell_name");
                 let args: [&CStr; 0] = [];
-                // [CStr::from_bytes_until_nul(b"sh\0").expect("Problem in setting the args")];
-                std::env::remove_var("PROMPT_COMMAND");
-                std::env::set_var("PS1", "$ ");
+
+                // // For standardizing the shell prompts to `$`
+                // std::env::remove_var("PROMPT_COMMAND");
+                // std::env::set_var("PS1", "$ ");
+
                 nix::unistd::execvp(shell_name, &args).unwrap();
 
                 exit(1);
@@ -53,15 +54,15 @@ fn main() {
 
 // #[derive(Default)]
 struct Termion {
-    fd: File,
+    fd: OwnedFd,
     buf: Vec<u8>,
 }
 
 impl Termion {
     fn new(_cc: &eframe::CreationContext<'_>, fd: OwnedFd) -> Self {
         Termion {
+            fd,
             buf: Vec::new(),
-            fd: fd.into(),
         }
     }
 }
@@ -71,7 +72,7 @@ impl eframe::App for Termion {
         let mut buf = vec![0u8; 4096];
         // let mut string;
         println!(":");
-        match self.fd.read(&mut buf) {
+        match nix::unistd::read(self.fd.as_raw_fd(), &mut buf) {
             Ok(0) => {
                 println!("EOF reached");
                 return;
@@ -80,7 +81,7 @@ impl eframe::App for Termion {
                 self.buf.extend_from_slice(&buf[0..read_size]);
             }
             Err(e) => {
-                if e.kind() != std::io::ErrorKind::WouldBlock {
+                if e != Errno::EAGAIN {
                     println!("Read Failed due to: {}", e);
                 } else {
                     println!("-");
@@ -88,10 +89,26 @@ impl eframe::App for Termion {
             }
         }
 
-        let str_temp = std::str::from_utf8(&self.buf).unwrap();
+        let binding = self.buf.clone();
+        let str_temp = std::str::from_utf8(&binding).unwrap();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Hello World! I am working on a new project");
+            ui.input(|input_state| {
+                for event in &input_state.events {
+                    let egui::Event::Text(text) = event else {
+                        continue;
+                    };
+
+                    let bytes = text.as_bytes();
+                    let mut to_write: &[u8] = &bytes;
+
+                    while to_write.len() > 0 {
+                        let written = nix::unistd::write(self.fd.as_fd(), to_write).unwrap();
+                        to_write = &to_write[written..];
+                    }
+                }
+            });
             ui.label(str_temp);
         });
     }

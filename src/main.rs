@@ -23,14 +23,14 @@ fn main() {
             }
             ForkptyResult::Child => {
                 println!("Child process. Proceeding to execute shell...");
-                let shell_name = CStr::from_bytes_until_nul(b"sh\0")
+                let shell_name = CStr::from_bytes_until_nul(b"/bin/bash\0")
                     .expect("Something went wrong in creating the shell_name");
                 let args: [&CStr; 0] = [];
 
                 // // For standardizing the shell prompts to `$`
                 // // Also solves the issue of double enter on pressing one enter
                 std::env::remove_var("PROMPT_COMMAND");
-                std::env::set_var("PS1", "$ ");
+                std::env::set_var("PS1", "\\[\\e[?2004l\\]$ ");
 
                 nix::unistd::execvp(shell_name, &args).unwrap();
 
@@ -56,8 +56,8 @@ fn main() {
 struct Termion {
     fd: OwnedFd,
     buf: Vec<u8>,
-    command_history: Vec<String>, // Store command history
-    current_command: String,      // Track current command being typed
+    command_history: Vec<String>, // Store all commands TODO: Add delete button, add persistence
+    current_command: String,      // Tracks current command pre enter press
 }
 
 impl Termion {
@@ -104,7 +104,11 @@ impl eframe::App for Termion {
             });
 
         let binding = self.buf.clone();
-        let str_temp = std::str::from_utf8(&binding).unwrap();
+        let cleaned_output: String = binding
+            .iter()
+            .filter(|&&c| c.is_ascii_graphic() || c.is_ascii_whitespace())
+            .map(|&c| c as char)
+            .collect();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.input(|input_state| {
@@ -135,7 +139,7 @@ impl eframe::App for Termion {
                     }
                 }
             });
-            ui.label(str_temp);
+            ui.label(cleaned_output);
         });
     }
 }

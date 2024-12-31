@@ -28,8 +28,9 @@ fn main() {
                 let args: [&CStr; 0] = [];
 
                 // // For standardizing the shell prompts to `$`
-                // std::env::remove_var("PROMPT_COMMAND");
-                // std::env::set_var("PS1", "$ ");
+                // // Also solves the issue of double enter on pressing one enter
+                std::env::remove_var("PROMPT_COMMAND");
+                std::env::set_var("PS1", "$ ");
 
                 nix::unistd::execvp(shell_name, &args).unwrap();
 
@@ -93,11 +94,18 @@ impl eframe::App for Termion {
         let str_temp = std::str::from_utf8(&binding).unwrap();
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Hello World! I am working on a new project");
+            // ui.heading("Hello World! I am working on a new project");
             ui.input(|input_state| {
                 for event in &input_state.events {
-                    let egui::Event::Text(text) = event else {
-                        continue;
+                    let text = match event {
+                        egui::Event::Text(text) => text,
+                        egui::Event::Key { key, .. } => match key {
+                            // \r takes the cursor back to the first position in the line
+                            // \n pushed the paper up by one line, like a type writer...
+                            egui::Key::Enter => "\r\n",
+                            _ => "",
+                        },
+                        _ => "",
                     };
 
                     let bytes = text.as_bytes();

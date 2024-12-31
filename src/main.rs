@@ -1,10 +1,14 @@
 use eframe::egui;
-use nix::pty::{forkpty, ForkptyResult};
+use nix::{
+    fcntl::{fcntl, FcntlArg, OFlag},
+    pty::{forkpty, ForkptyResult},
+};
+
 use std::{
-    ffi::{CStr, CString},
+    ffi::CStr,
     fs::File,
     io::Read,
-    os::fd::OwnedFd,
+    os::fd::{AsRawFd, OwnedFd},
     process::exit,
 };
 
@@ -14,30 +18,20 @@ fn main() {
         match res {
             ForkptyResult::Parent { child, master } => {
                 println!("Parent process. Child PID: {} Master FD: Some_value", child);
+                fcntl(master.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+                    .expect("Failed to set non-blocking mode");
                 Some(master) // Return the master file descriptor
             }
             ForkptyResult::Child => {
                 println!("Child process. Proceeding to execute shell...");
                 let shell_name = CStr::from_bytes_until_nul(b"sh\0")
                     .expect("Something went wrong in creating the shell_name");
-                let args: [&CStr; 1] =
-                    [CStr::from_bytes_until_nul(b"sh\0").expect("Problem in setting the args")];
+                let args: [&CStr; 0] = [];
+                // [CStr::from_bytes_until_nul(b"sh\0").expect("Problem in setting the args")];
                 std::env::remove_var("PROMPT_COMMAND");
                 std::env::set_var("PS1", "$ ");
                 nix::unistd::execvp(shell_name, &args).unwrap();
 
-                // // This gives the following error: Read Failed due to: Input/output error (os error 5)
-
-                // let command = CString::new("echo").expect("CString::new failed");
-                // let arg1 = CString::new("123").expect("CString::new failed");
-                // let args: [&CStr; 2] = [&command, &arg1];
-                // nix::unistd::execvp(&command, &args).unwrap();
-
-                // // This freezes
-
-                // let shell = CString::new("/bin/bash").unwrap();
-                // let args: [&CStr; 1] = [&shell];
-                // nix::unistd::execvp(&shell, &args).unwrap();
                 exit(1);
             }
         }
@@ -86,7 +80,11 @@ impl eframe::App for Termion {
                 self.buf.extend_from_slice(&buf[0..read_size]);
             }
             Err(e) => {
-                println!("Read Failed due to: {}", e);
+                if e.kind() != std::io::ErrorKind::WouldBlock {
+                    println!("Read Failed due to: {}", e);
+                } else {
+                    println!("-");
+                }
             }
         }
 

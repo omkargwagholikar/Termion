@@ -99,8 +99,12 @@ impl eframe::App for Termion {
                 ui.heading("Command History");
                 ui.separator();
                 for cmd in &self.command_history {
-                    ui.label(cmd);
+                    if ui.button(cmd).clicked() {
+                        println!("Clicked: {}", cmd);
+                    };
+                    // ui.label(cmd);
                 }
+                // egui::
             });
 
         let binding = self.buf.clone();

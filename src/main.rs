@@ -30,7 +30,8 @@ fn main() {
                 // // For standardizing the shell prompts to `$`
                 // // Also solves the issue of double enter on pressing one enter
                 std::env::remove_var("PROMPT_COMMAND");
-                std::env::set_var("PS1", "\\[\\e[?2004l\\]$ ");
+                std::env::set_var("PS1", "$ ");
+                // std::env::set_var("PS1", "\\[\\e[?2004l\\]$ ");
 
                 nix::unistd::execvp(shell_name, &args).unwrap();
 
@@ -100,19 +101,36 @@ impl eframe::App for Termion {
                 ui.separator();
                 for cmd in &self.command_history {
                     if ui.button(cmd).clicked() {
-                        println!("Clicked: {}", cmd);
-                    };
-                    // ui.label(cmd);
+                        println!("Clicked:: {}", cmd);
+                        // Clear the current user-typed command
+                        self.current_command.clear();
+
+                        // Execute the command in the terminal
+                        let cmd_with_newline = format!("{}\n", cmd); // Append newline to simulate Enter press
+                        let bytes = cmd_with_newline.as_bytes();
+                        let mut to_write: &[u8] = &bytes;
+                        while to_write.len() > 0 {
+                            match nix::unistd::write(self.fd.as_fd(), to_write) {
+                                Ok(written) => to_write = &to_write[written..],
+                                Err(e) => {
+                                    println!("Failed to write command to terminal: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                        println!("Executed command: {}", cmd);
+                    }
                 }
-                // egui::
             });
 
         let binding = self.buf.clone();
-        let cleaned_output: String = binding
+        let mut cleaned_output: String = binding
             .iter()
             .filter(|&&c| c.is_ascii_graphic() || c.is_ascii_whitespace())
             .map(|&c| c as char)
             .collect();
+
+        cleaned_output = cleaned_output.replace("[?2004h", "").replace("[?2004l", "");
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.input(|input_state| {
@@ -135,7 +153,10 @@ impl eframe::App for Termion {
                         },
                         _ => "",
                     };
-                    let bytes = text.as_bytes();
+
+                    let temp_text = &text.replace("[?2004h", "").replace("[?2004l", "");
+                    let bytes = temp_text.as_bytes();
+
                     let mut to_write: &[u8] = &bytes;
                     while to_write.len() > 0 {
                         let written = nix::unistd::write(self.fd.as_fd(), to_write).unwrap();

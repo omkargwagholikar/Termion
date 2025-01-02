@@ -17,6 +17,7 @@ fn main() {
         match res {
             ForkptyResult::Parent { child, master } => {
                 println!("Parent process. Child PID: {} Master FD: Some_value", child);
+                // File in non blocking mode to avoid freezing issue
                 fcntl(master.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
                     .expect("Failed to set non-blocking mode");
                 Some(master) // Return the master file descriptor
@@ -95,7 +96,7 @@ impl eframe::App for Termion {
 
         // Show command history in side panel
         egui::SidePanel::left("history_panel")
-            .min_width(200.0)
+            .min_width(100.0)
             .show(ctx, |ui| {
                 ui.heading("Command History");
                 ui.separator();
@@ -132,39 +133,46 @@ impl eframe::App for Termion {
 
         cleaned_output = cleaned_output.replace("[?2004h", "").replace("[?2004l", "");
 
+        // The main terminal area
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.input(|input_state| {
-                for event in &input_state.events {
-                    let text = match event {
-                        egui::Event::Text(text) => {
-                            self.current_command.push_str(text);
-                            text
-                        }
-                        egui::Event::Key { key, .. } => match key {
-                            egui::Key::Enter => {
-                                // Store command in history when Enter is pressed
-                                if !self.current_command.trim().is_empty() {
-                                    self.command_history.push(self.current_command.clone());
+            egui::ScrollArea::both()
+                .auto_shrink([false; 2]) // Prevent shrinking; ensures resizing works
+                .stick_to_bottom(true) // For large commands, helps keep ip part in focus
+                .show(ui, |ui| {
+                    ui.input(|input_state| {
+                        for event in &input_state.events {
+                            let text = match event {
+                                egui::Event::Text(text) => {
+                                    self.current_command.push_str(text);
+                                    text
                                 }
-                                self.current_command.clear();
-                                "\n"
+                                egui::Event::Key { key, .. } => match key {
+                                    egui::Key::Enter => {
+                                        // Store command in history when Enter is pressed
+                                        if !self.current_command.trim().is_empty() {
+                                            self.command_history.push(self.current_command.clone());
+                                        }
+                                        self.current_command.clear();
+                                        "\n"
+                                    }
+                                    _ => "",
+                                },
+                                _ => "",
+                            };
+
+                            let temp_text = &text.replace("[?2004h", "").replace("[?2004l", ""); // Solution untill ansi codes parsing is implemented
+                            let bytes = temp_text.as_bytes();
+
+                            let mut to_write: &[u8] = &bytes;
+                            while to_write.len() > 0 {
+                                let written =
+                                    nix::unistd::write(self.fd.as_fd(), to_write).unwrap();
+                                to_write = &to_write[written..];
                             }
-                            _ => "",
-                        },
-                        _ => "",
-                    };
-
-                    let temp_text = &text.replace("[?2004h", "").replace("[?2004l", "");
-                    let bytes = temp_text.as_bytes();
-
-                    let mut to_write: &[u8] = &bytes;
-                    while to_write.len() > 0 {
-                        let written = nix::unistd::write(self.fd.as_fd(), to_write).unwrap();
-                        to_write = &to_write[written..];
-                    }
-                }
-            });
-            ui.label(cleaned_output);
+                        }
+                    });
+                    ui.label(cleaned_output);
+                });
         });
     }
 }

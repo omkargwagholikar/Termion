@@ -31,8 +31,11 @@ fn main() {
                 // // For standardizing the shell prompts to `$`
                 // // Also solves the issue of double enter on pressing one enter
                 std::env::remove_var("PROMPT_COMMAND");
-                std::env::set_var("PS1", "$ ");
-                // std::env::set_var("PS1", "\\[\\e[?2004l\\]$ ");
+                // std::env::set_var("PS1", "$ ");
+                std::env::set_var("PS1", "\\[\\e[?2004l\\]$ ");
+                //
+                // Disable bracketed paste mode
+                std::env::set_var("TERM", "dumb");
 
                 nix::unistd::execvp(shell_name, &args).unwrap();
 
@@ -76,7 +79,7 @@ impl Termion {
 impl eframe::App for Termion {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut buf = vec![0u8; 4096];
-        println!(":");
+        // println!(":");
         match nix::unistd::read(self.fd.as_raw_fd(), &mut buf) {
             Ok(0) => {
                 println!("EOF reached");
@@ -88,13 +91,14 @@ impl eframe::App for Termion {
             Err(e) => {
                 if e != Errno::EAGAIN {
                     println!("Read Failed due to: {}", e);
+                    // exit(1); // Kill the emulator if there is error;
                 } else {
-                    println!("-");
+                    // println!("-");
                 }
             }
         }
 
-        // Show command history in side panel
+        // Side panel remains the same...
         egui::SidePanel::left("history_panel")
             .min_width(100.0)
             .show(ctx, |ui| {
@@ -103,11 +107,8 @@ impl eframe::App for Termion {
                 for cmd in &self.command_history {
                     if ui.button(cmd).clicked() {
                         println!("Clicked:: {}", cmd);
-                        // Clear the current user-typed command
                         self.current_command.clear();
-
-                        // Execute the command in the terminal
-                        let cmd_with_newline = format!("{}\n", cmd); // Append newline to simulate Enter press
+                        let cmd_with_newline = format!("{}\n", cmd);
                         let bytes = cmd_with_newline.as_bytes();
                         let mut to_write: &[u8] = &bytes;
                         while to_write.len() > 0 {
@@ -119,7 +120,7 @@ impl eframe::App for Termion {
                                 }
                             }
                         }
-                        println!("Executed command: {}", cmd);
+                        println!("Executed command from sidepanel: {}", cmd);
                     }
                 }
             });
@@ -133,7 +134,6 @@ impl eframe::App for Termion {
 
         cleaned_output = cleaned_output.replace("[?2004h", "").replace("[?2004l", "");
 
-        // The main terminal area
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::both()
                 .auto_shrink([false; 2]) // Prevent shrinking; ensures resizing works
@@ -146,21 +146,35 @@ impl eframe::App for Termion {
                                     self.current_command.push_str(text);
                                     text
                                 }
-                                egui::Event::Key { key, .. } => match key {
+                                egui::Event::Key { key, pressed, .. } => match key {
                                     egui::Key::Enter => {
-                                        // Store command in history when Enter is pressed
                                         if !self.current_command.trim().is_empty() {
                                             self.command_history.push(self.current_command.clone());
                                         }
                                         self.current_command.clear();
                                         "\n"
                                     }
+                                    egui::Key::Backspace => {
+                                        println!("Hello world");
+                                        if *pressed && !self.current_command.is_empty() {
+                                            self.current_command.pop();
+                                            let backspace_char = b'\x08'; // ASCII backspace character
+                                            nix::unistd::write(self.fd.as_fd(), &[backspace_char])
+                                                .unwrap();
+                                            ""
+                                            // "\x08" // ASCII backspace character, TODO: Get ansi escape codes to work, the backspace is working but not reflected in the UI
+                                            // "\x7F" // Delete character (DEL)
+                                        } else {
+                                            ""
+                                        }
+                                    }
                                     _ => "",
                                 },
                                 _ => "",
                             };
 
-                            let temp_text = &text.replace("[?2004h", "").replace("[?2004l", ""); // Solution untill ansi codes parsing is implemented
+                            // let temp_text = &text.replace("[?2004h", "").replace("[?2004l", "");
+                            let temp_text = &text;
                             let bytes = temp_text.as_bytes();
 
                             let mut to_write: &[u8] = &bytes;
@@ -172,6 +186,7 @@ impl eframe::App for Termion {
                         }
                     });
                     ui.label(cleaned_output);
+                    ctx.request_repaint(); // Explicitly request a repaint
                 });
         });
     }

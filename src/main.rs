@@ -5,6 +5,7 @@ use nix::{
     pty::{forkpty, ForkptyResult},
 };
 
+use core::f32;
 use std::{
     ffi::CStr,
     os::fd::{AsFd, AsRawFd, OwnedFd},
@@ -63,21 +64,65 @@ struct Termion {
     buf: Vec<u8>,
     command_history: Vec<String>, // Store all commands TODO: Add delete button, add persistence
     current_command: String,      // Tracks current command pre enter press
+    cursor_pos: (usize, usize),   // Window space and scroll back
+    character_size: Option<(f32, f32)>,
 }
 
 impl Termion {
-    fn new(_cc: &eframe::CreationContext<'_>, fd: OwnedFd) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, fd: OwnedFd) -> Self {
+        let mut font_id = None;
+        cc.egui_ctx.style_mut(|style| {
+            style.override_text_style = Some(egui::TextStyle::Monospace);
+            font_id = Some(style.text_styles[&egui::TextStyle::Monospace].clone())
+        });
+
         Termion {
             fd,
             buf: Vec::new(),
             command_history: Vec::new(),
             current_command: String::new(),
+            cursor_pos: (0, 0),
+            character_size: None,
         }
     }
+}
+fn get_char_size(cc: &egui::Context) -> (f32, f32) {
+    let font_id = cc.style().text_styles[&egui::TextStyle::Monospace].clone();
+    let (width, height) = cc.fonts(|fonts| {
+        let layout = fonts.layout(
+            "@".to_string(),
+            font_id,
+            egui::Color32::default(),
+            f32::INFINITY,
+        );
+        (layout.rect.width(), layout.rect.height())
+    });
+
+    println!("Character dimentions are: {}, {}", width, height);
+
+    return (width, height);
+}
+
+fn char_to_cursor_offset(
+    character_pos: &(usize, usize),
+    character_size: &(f32, f32),
+    content: &[u8],
+) -> (f32, f32) {
+    let content_by_lines: Vec<&[u8]> = content.split(|b| *b == b'\n').collect();
+    let num_lines = content_by_lines.len();
+    // let last_line = content_by_lines.last().unwrap_or(&[0u8]);
+    let x_offset = character_pos.0 as f32 * character_size.0;
+    let y_offset = (character_pos.1 as i64 - num_lines as i64) as f32 * character_size.1;
+    (x_offset, y_offset)
 }
 
 impl eframe::App for Termion {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.character_size.is_none() {
+            self.character_size = Some(get_char_size(ctx));
+            println!("self.character_size: {:?}", self.character_size);
+        }
+
         let mut buf = vec![0u8; 4096];
         // println!(":");
         match nix::unistd::read(self.fd.as_raw_fd(), &mut buf) {
@@ -86,7 +131,14 @@ impl eframe::App for Termion {
                 return;
             }
             Ok(read_size) => {
-                self.buf.extend_from_slice(&buf[0..read_size]);
+                let incoming = &buf[0..read_size];
+                for c in incoming {
+                    match c {
+                        b'\n' => self.cursor_pos = (0, 1 + self.cursor_pos.1),
+                        _ => self.cursor_pos = (1 + self.cursor_pos.0, self.cursor_pos.1),
+                    }
+                }
+                self.buf.extend_from_slice(incoming);
             }
             Err(e) => {
                 if e != Errno::EAGAIN {
@@ -99,31 +151,31 @@ impl eframe::App for Termion {
         }
 
         // Side panel remains the same...
-        egui::SidePanel::left("history_panel")
-            .min_width(100.0)
-            .show(ctx, |ui| {
-                ui.heading("Command History");
-                ui.separator();
-                for cmd in &self.command_history {
-                    if ui.button(cmd).clicked() {
-                        println!("Clicked:: {}", cmd);
-                        self.current_command.clear();
-                        let cmd_with_newline = format!("{}\n", cmd);
-                        let bytes = cmd_with_newline.as_bytes();
-                        let mut to_write: &[u8] = &bytes;
-                        while to_write.len() > 0 {
-                            match nix::unistd::write(self.fd.as_fd(), to_write) {
-                                Ok(written) => to_write = &to_write[written..],
-                                Err(e) => {
-                                    println!("Failed to write command to terminal: {}", e);
-                                    break;
-                                }
-                            }
-                        }
-                        println!("Executed command from sidepanel: {}", cmd);
-                    }
-                }
-            });
+        // egui::SidePanel::right("history_panel")
+        //     .min_width(100.0)
+        //     .show(ctx, |ui| {
+        //         ui.heading("Command History");
+        //         ui.separator();
+        //         for cmd in &self.command_history {
+        //             if ui.button(cmd).clicked() {
+        //                 println!("Clicked:: {}", cmd);
+        //                 self.current_command.clear();
+        //                 let cmd_with_newline = format!("{}\n", cmd);
+        //                 let bytes = cmd_with_newline.as_bytes();
+        //                 let mut to_write: &[u8] = &bytes;
+        //                 while to_write.len() > 0 {
+        //                     match nix::unistd::write(self.fd.as_fd(), to_write) {
+        //                         Ok(written) => to_write = &to_write[written..],
+        //                         Err(e) => {
+        //                             println!("Failed to write command to terminal: {}", e);
+        //                             break;
+        //                         }
+        //                     }
+        //                 }
+        //                 println!("Executed command from sidepanel: {}", cmd);
+        //             }
+        //         }
+        //     });
 
         let binding = self.buf.clone();
         let mut cleaned_output: String = binding
@@ -185,7 +237,25 @@ impl eframe::App for Termion {
                             }
                         }
                     });
-                    ui.label(cleaned_output);
+                    let response = ui.label(cleaned_output);
+
+                    let left = response.rect.left();
+                    let bottom = response.rect.bottom();
+
+                    let painter = ui.painter();
+                    let character_size = self.character_size.as_ref().unwrap();
+                    let (x_offset, y_offset) =
+                        char_to_cursor_offset(&self.cursor_pos, character_size, &self.buf);
+
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(left + x_offset, bottom + y_offset),
+                            egui::vec2(character_size.0, character_size.1),
+                        ),
+                        0.0,
+                        egui::Color32::GREEN,
+                    );
+                    println!("{} {}", x_offset, y_offset);
                     ctx.request_repaint(); // Explicitly request a repaint
                 });
         });

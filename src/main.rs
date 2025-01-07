@@ -7,9 +7,7 @@ use nix::{
 
 use core::f32;
 use std::{
-    ffi::CStr,
-    os::fd::{AsFd, AsRawFd, OwnedFd},
-    process::exit,
+    ffi::CStr, os::fd::{AsFd, AsRawFd, OwnedFd}, process::exit
 };
 
 fn main() {
@@ -59,13 +57,14 @@ fn main() {
     }
 }
 
-struct Termion {
+pub struct Termion {
     fd: OwnedFd,
     buf: Vec<u8>,
     command_history: Vec<String>, // Store all commands TODO: Add delete button, add persistence
     current_command: String,      // Tracks current command pre enter press
     cursor_pos: (usize, usize),   // Window space and scroll back
     character_size: Option<(f32, f32)>,
+    output_buf: OutputBuffer
 }
 
 impl Termion {
@@ -83,6 +82,7 @@ impl Termion {
             current_command: String::new(),
             cursor_pos: (0, 0),
             character_size: None,
+            output_buf: OutputBuffer::new(),
         }
     }
 }
@@ -116,6 +116,181 @@ fn char_to_cursor_offset(
     (x_offset, y_offset)
 }
 
+
+fn accumulate_csi_buf(buf: &[u8]) -> Option<usize> {
+    if buf.is_empty() {
+        return  None;
+    }
+
+    let n = std::str::from_utf8(buf).expect("ASCII digits are expected to be pared  as utf8 to usize unless negative").parse().expect("Valid numbers should be able to be parsed into usize unless negative");
+    return Some(n);
+}
+
+fn is_csi_terminator(b: u8) -> bool {
+    match b {
+        b'A' | b'B' | b'C' | 
+        b'D' | b'E' | b'F' | 
+        b'G' | b'H' | b'J' | 
+        b'K' | b'S' | b'T' | 
+        b'f' => true,
+        _ => false,
+        //aux ones are not supported
+    }
+}
+
+
+enum TerminalOutput {
+    SetCursorPos {
+        x: usize,
+        y: usize
+    },
+    Data(Vec<u8>)
+}
+
+#[derive(Eq, PartialEq)]
+enum CsiParserState {
+    N (Vec<u8>), 
+    M(Vec<u8>),
+    Finished(u8), // u8 Because there are different terminal values for the differnt code with same params, like `n;m H` and `n;m l`. u8 tracks the last value
+    Invalid
+}
+struct CsiParser {
+    state: CsiParserState,
+    n: Option<usize>, // Generic word in CSI codes for the row
+    m: Option<usize>, // Generic word in CSI codes for the col
+}
+
+impl CsiParser {
+    fn new() -> CsiParser{
+        CsiParser {
+            state: CsiParserState::N(Vec::new()),
+            n: None,
+            m: None
+        }
+    }
+
+    fn push(&mut self, b:u8) {
+        // assert!(self.state != CsiParserState::Finished(_));
+        if let CsiParserState::Finished(_) = &self.state {
+            panic!("This should not happen");
+        }
+
+        if b == b'H' {
+            self.state = CsiParserState::Finished(b'H');
+            return;
+        }
+
+        match &mut self.state {
+            CsiParserState::N(buf) => {
+                if is_csi_terminator(b) {
+                    self.state = CsiParserState::Finished(b);
+                    return;
+                }
+                if b == b';' {
+                    self.n = accumulate_csi_buf(buf);
+                    self.state = CsiParserState::M(Vec::new());
+                } else if b.is_ascii_digit() {
+                    buf.push(b);
+                } else {
+                    let printable = char::from_u32(b.clone() as u32).unwrap();
+                    panic!("Unexpected character in n: {b:x} {}", printable);
+                }
+            },
+            CsiParserState::M(buf) => {
+                if is_csi_terminator(b) {
+                    self.m = accumulate_csi_buf(buf);
+                    self.state = CsiParserState::Finished(b);
+                } else if b.is_ascii_digit() {
+                    buf.push(b);
+                } else {
+                    let printable = char::from_u32(b.clone() as u32).unwrap();
+                    panic!("Unexpected character in m: {b:x} {}", printable);
+                }                
+            },
+            CsiParserState::Finished(_) => {
+                panic!("CsiParserState::Finished Should not be rechable")
+            },
+            CsiParserState::Invalid => {
+                panic!("CsiParserState::Invalid Should not be rechable")
+            },
+        }
+    }
+}
+enum AnsiBuilder {
+    Empty,
+    Escape,
+    Csi(CsiParser),  // This is the control sequence introducer '[' and ']'
+}
+pub struct OutputBuffer{
+    // buf: Vec<u8>, 
+    current_state: AnsiBuilder
+}
+
+impl OutputBuffer {
+    pub fn new() -> OutputBuffer{
+        OutputBuffer{
+            current_state: AnsiBuilder::Empty,
+        }
+    }
+    fn push(&mut self, incoming: &[u8]) -> Vec<TerminalOutput>{
+        let mut output = Vec::new();        
+        let mut data_output = Vec::new();
+        
+        for b in incoming {
+            
+            println!("{} {b:x}", *b as char);
+
+            match &mut self.current_state {
+                AnsiBuilder::Empty => {
+                    if *b == b'\x1b'{
+                        // This is [ aka the control sequence introducer
+                        self.current_state = AnsiBuilder::Escape;
+                        continue;
+                    } else {
+                        data_output.push(*b);
+                    }
+                }, 
+                AnsiBuilder::Escape => {
+                    output.push(TerminalOutput::Data(std::mem::take(&mut data_output)));
+                    // panic!("Unhandled escape sequence: {b:x}");
+                    match b {
+                        b'[' => {
+                            self.current_state = AnsiBuilder::Csi(CsiParser::new());
+                        }
+                        _ => {
+                            let printable = char::from_u32(*b as u32).unwrap();
+                            panic!("Unhandled escape sequence: {b:x} {}", printable);
+                        }
+                    }
+                },
+                AnsiBuilder::Csi(parser) => {
+                    parser.push(*b);
+                    match &parser.state {
+                        // CsiParserState::N(vec) => {},
+                        // CsiParserState::M(vec) => {},
+                        CsiParserState::Finished(b'H') => {
+                            // Request to move the cursor position
+                            // unwrap or 1 cause 1 is the default
+                            output.push(TerminalOutput::SetCursorPos { x: parser.n.unwrap_or(1), y: parser.m.unwrap_or(1) });
+                            self.current_state = AnsiBuilder::Empty;
+                        },
+                        _ => {
+                            // Some other request
+                            println!("Some other request/ state");
+                        },
+                    }
+                }
+            }
+        }
+        
+        if !data_output.is_empty() {
+            output.push(TerminalOutput::Data(std::mem::take(&mut data_output)));
+        }
+
+        output
+    }
+}
+
 impl eframe::App for Termion {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.character_size.is_none() {
@@ -132,6 +307,20 @@ impl eframe::App for Termion {
             }
             Ok(read_size) => {
                 let incoming = &buf[0..read_size];
+                let parsed = self.output_buf.push(incoming);
+                for segment in parsed {
+                    match segment {
+                        // TerminalOutput::Ansi(_vec) => {                            
+                        //     println!("To do");
+                        // },
+                        TerminalOutput::Data(_vec) => {
+                            println!("not to do")
+                        },
+                        TerminalOutput::SetCursorPos { x, y } => {
+                            panic!("need to update cursor position");
+                        },
+                    }
+                }
                 for c in incoming {
                     match c {
                         b'\n' => self.cursor_pos = (0, 1 + self.cursor_pos.1),
@@ -178,13 +367,14 @@ impl eframe::App for Termion {
             });
 
         let binding = self.buf.clone();
-        let mut cleaned_output: String = binding
+        let cleaned_output: String = binding
             .iter()
             .filter(|&&c| c.is_ascii_graphic() || c.is_ascii_whitespace())
             .map(|&c| c as char)
             .collect();
 
-        cleaned_output = cleaned_output.replace("[?2004h", "").replace("[?2004l", "");
+        // println!("cleaned_output: {}", cleaned_output);
+        // cleaned_output = cleaned_output.replace("[?2004h", "").replace("[?2004l", "");
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::both()
@@ -207,7 +397,7 @@ impl eframe::App for Termion {
                                         "\n"
                                     }
                                     egui::Key::Backspace => {
-                                        println!("Hello world");
+                                        println!("Backspace pressed TODO: Handle it");
                                         if *pressed && !self.current_command.is_empty() {
                                             self.current_command.pop();
                                             let backspace_char = b'\x08'; // ASCII backspace character
@@ -255,7 +445,7 @@ impl eframe::App for Termion {
                         0.0,
                         egui::Color32::GREEN,
                     );
-                    println!("{} {}", x_offset, y_offset);
+                    // println!("{} {}", x_offset, y_offset);
                     ctx.request_repaint(); // Explicitly request a repaint
                 });
         });

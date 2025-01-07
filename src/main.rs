@@ -32,8 +32,8 @@ fn main() {
                 // // For standardizing the shell prompts to `$`
                 // // Also solves the issue of double enter on pressing one enter
                 std::env::remove_var("PROMPT_COMMAND");
-                // std::env::set_var("PS1", "$ ");
-                std::env::set_var("PS1", "\\[\\e[?2004l\\]$ ");
+                std::env::set_var("PS1", "$");
+                // std::env::set_var("PS1", "\\[\\e[?2004l\\]$ ");
                 //
                 // Disable bracketed paste mode
                 std::env::set_var("TERM", "dumb");
@@ -95,7 +95,7 @@ fn get_char_size(cc: &egui::Context) -> (f32, f32) {
             egui::Color32::default(),
             f32::INFINITY,
         );
-        (layout.rect.width(), layout.rect.height())
+        (layout.mesh_bounds.width(), layout.mesh_bounds.height())
     });
 
     println!("Character dimentions are: {}, {}", width, height);
@@ -151,31 +151,31 @@ impl eframe::App for Termion {
         }
 
         // Side panel remains the same...
-        // egui::SidePanel::right("history_panel")
-        //     .min_width(100.0)
-        //     .show(ctx, |ui| {
-        //         ui.heading("Command History");
-        //         ui.separator();
-        //         for cmd in &self.command_history {
-        //             if ui.button(cmd).clicked() {
-        //                 println!("Clicked:: {}", cmd);
-        //                 self.current_command.clear();
-        //                 let cmd_with_newline = format!("{}\n", cmd);
-        //                 let bytes = cmd_with_newline.as_bytes();
-        //                 let mut to_write: &[u8] = &bytes;
-        //                 while to_write.len() > 0 {
-        //                     match nix::unistd::write(self.fd.as_fd(), to_write) {
-        //                         Ok(written) => to_write = &to_write[written..],
-        //                         Err(e) => {
-        //                             println!("Failed to write command to terminal: {}", e);
-        //                             break;
-        //                         }
-        //                     }
-        //                 }
-        //                 println!("Executed command from sidepanel: {}", cmd);
-        //             }
-        //         }
-        //     });
+        egui::SidePanel::right("history_panel")
+            .min_width(100.0)
+            .show(ctx, |ui| {
+                ui.heading("Command History");
+                ui.separator();
+                for cmd in &self.command_history {
+                    if ui.button(cmd).clicked() {
+                        println!("Clicked:: {}", cmd);
+                        self.current_command.clear();
+                        let cmd_with_newline = format!("{}\n", cmd);
+                        let bytes = cmd_with_newline.as_bytes();
+                        let mut to_write: &[u8] = &bytes;
+                        while to_write.len() > 0 {
+                            match nix::unistd::write(self.fd.as_fd(), to_write) {
+                                Ok(written) => to_write = &to_write[written..],
+                                Err(e) => {
+                                    println!("Failed to write command to terminal: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                        println!("Executed command from sidepanel: {}", cmd);
+                    }
+                }
+            });
 
         let binding = self.buf.clone();
         let mut cleaned_output: String = binding
